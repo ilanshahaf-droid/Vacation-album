@@ -142,7 +142,7 @@ function renderAcct(){
   const own = albumOwner === user.id;
   $("acctExtra").innerHTML = (albums.length > 1
       ? `<select id="albumPick" class="field" style="width:auto;padding:4px 8px;font-size:13px">${albums.map(a => `<option value="${esc(a.owner)}"${a.owner === albumOwner ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select>` : "")
-    + (own && membersOk ? `<button type="button" id="btnShare">👥 שיתוף</button>` : "");
+    + (own ? `<button type="button" id="btnShare" class="btn small" style="text-decoration:none;color:var(--teal)">👥 שיתוף</button>` : "");
 }
 document.addEventListener("change", e => {
   if (e.target.id !== "albumPick") return;
@@ -152,7 +152,11 @@ document.addEventListener("change", e => {
 document.addEventListener("click", e => { if (e.target.id === "btnShare") openShare(); });
 async function openShare(){
   const {data, error} = await sb.from(T_MEM).select("email").eq("owner_id", user.id).order("created_at");
-  if (error){ toast("לא הצלחתי לטעון את השיתופים"); return; }
+  if (error){
+    toast(/does not exist|schema cache|permission denied/i.test(error.message || "")
+      ? "כדי להפעיל שיתוף צריך להריץ פעם אחת את update-sharing.sql ב-Supabase" : "לא הצלחתי לטעון את השיתופים", 5000);
+    return;
+  }
   const list = data.map(m => m.email);
   const listHtml = () => list.length
     ? list.map(em => `<li style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px dashed var(--line)"><span dir="ltr">${esc(em)}</span><button type="button" class="icon-btn" data-rm-share="${esc(em)}" title="הסרה">✕</button></li>`).join("")
