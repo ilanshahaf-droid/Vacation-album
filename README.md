@@ -3,7 +3,7 @@
 אלבום זיכרונות מכל החופשות: מיקום, תאריכים, מקומות, מסעדות, אתרים, הצגות/מופעים/מוזיאונים/אטרקציות ותמונות.
 
 ## הקמה (פעם אחת)
-1. ב-Supabase (פרויקט Down-to-the-bone): SQL Editor ← להריץ את `schema.sql`, ואחריו את `update-sharing.sql`.
+1. ב-Supabase (פרויקט Down-to-the-bone): SQL Editor ← להריץ את `schema.sql`, ואחריו את `update-sharing.sql` ו-`update-files.sql`.
 2. ב-Supabase: Authentication ← URL Configuration ← להוסיף ל-Redirect URLs את
    `https://ilanshahaf-droid.github.io/Vacation-album/`
 3. ב-GitHub: Settings ← Pages ← Branch: `main` / root.

@@ -79,6 +79,7 @@ function fetchUrls(){
       data.forEach(d => { if (d.signedUrl) urls[d.path] = d.signedUrl; });
     }
     // fill images in place instead of re-rendering
+    document.querySelectorAll("a[data-path]").forEach(a => { const u = urls[a.dataset.path]; if (u && !a.getAttribute("href")) a.href = u; });
     document.querySelectorAll("img[data-path]").forEach(im => {
       const u = urls[im.dataset.path];
       if (u && !im.getAttribute("src")){ im.src = u; im.classList.remove("wait"); }
@@ -127,6 +128,46 @@ async function removeFiles(paths){
   if (!paths.length) return;
   for (let i = 0; i < paths.length; i += 100) await sb.storage.from(BUCKET).remove(paths.slice(i, i + 100)).catch(() => {});
 }
+
+/* ---------- attachments ---------- */
+const ATT_ACCEPT = "image/*,.pdf,.txt,.doc,.docx,.rtf,.odt,.xls,.xlsx,.csv,.ppt,.pptx";
+const pendingFiles = {};   // category -> File[] chosen in the add form
+const fileIcon = f => /^image\//.test(f.type) ? "🖼️" : /pdf/.test(f.type) ? "📕" : /sheet|excel|csv/.test(f.type) ? "📊" : "📄";
+async function uploadAttachment(tripId, file){
+  let blob = file, type = file.type || "application/octet-stream";
+  let ext = ((file.name || "").match(/\.([a-z0-9]{1,6})$/i) || [])[1] || "";
+  if (/^image\/(jpeg|png|webp|heic|heif)$/i.test(file.type)){ try { blob = await shrink(file); type = "image/jpeg"; ext = "jpg"; } catch(e){} }
+  if (blob.size > 10 * 1024 * 1024) throw {message:"too big"};
+  const path = `${albumOwner}/${tripId}/files/${rid()}${ext ? "." + ext.toLowerCase() : ""}`;
+  const {error} = await sb.storage.from(BUCKET).upload(path, blob, {contentType:type, upsert:false});
+  if (error) throw error;
+  if (type.startsWith("image/")) urls[path] = URL.createObjectURL(blob);
+  return {path, name:file.name || "קובץ", type, size:blob.size};
+}
+async function uploadAttachments(tripId, files){
+  const out = []; let failed = 0, mime = false;
+  for (let i = 0; i < files.length; i++){
+    toast(`מעלה קובץ ${i + 1} מתוך ${files.length}…`, 60000);
+    try { out.push(await uploadAttachment(tripId, files[i])); }
+    catch(e){ failed++; if (/mime|type/i.test((e && e.message) || "")) mime = true; }
+  }
+  if (mime) toast("כדי לצרף קבצים שאינם תמונות צריך להריץ פעם אחת את update-files.sql ב-Supabase", 6000);
+  else if (failed) toast(failed === 1 ? "קובץ אחד לא עלה (עד 10MB לקובץ)" : failed + " קבצים לא עלו (עד 10MB לקובץ)", 4500);
+  else toast(out.length === 1 ? "הקובץ צורף" : out.length + " קבצים צורפו");
+  return out;
+}
+function attsHtml(it, cat, ed){
+  const fs = it.files || []; if (!fs.length) return "";
+  return `<div class="atts">${fs.map(f => {
+    const img = /^image\//.test(f.type);
+    if (!urls[f.path]) wanted.add(f.path);
+    const href = urls[f.path] ? ` href="${esc(urls[f.path])}"` : "";
+    const inner = img ? `<a class="att-img" data-path="${esc(f.path)}"${href} target="_blank" rel="noopener" title="${esc(f.name)}">${imgTag(f.path)}</a>`
+      : `<a class="att" data-path="${esc(f.path)}"${href} target="_blank" rel="noopener">${fileIcon(f)} <span>${esc(f.name)}</span></a>`;
+    return `<span class="att-wrap">${inner}${ed ? `<button class="att-x" type="button" data-act="rm-file" data-cat="${cat.key}" data-id="${esc(it.id)}" data-path="${esc(f.path)}" title="הסרת הקובץ">✕</button>` : ""}</span>`;
+  }).join("")}</div>`;
+}
+const itemFilePaths = t => CATS.flatMap(c => (t[c.key] || []).flatMap(i => (i.files || []).map(f => f.path)));
 
 /* ---------- albums & sharing ---------- */
 const myEmail = () => ((user && user.email) || "").toLowerCase();
@@ -273,11 +314,12 @@ function renderTrip(t){
     const items = t[cat.key] || [];
     const lis = items.map(it => `<li>
         <div class="it"><b>${safeUrl(it.url) ? `<a href="${esc(safeUrl(it.url))}" target="_blank" rel="noopener" style="color:inherit">${esc(it.name)}</a>` : esc(it.name)}</b>${it.type ? `<span class="badge">${esc(it.type)}</span>` : ""}${it.rating ? `<span class="stars">${"★".repeat(it.rating)}${"☆".repeat(5 - it.rating)}</span>` : ""}
-        ${it.note ? `<span class="note">${esc(it.note)}</span>` : ""}</div>
+        ${it.note ? `<span class="note">${esc(it.note)}</span>` : ""}${attsHtml(it, cat, ed)}</div>
         <div class="acts">
           ${safeUrl(it.url) ? `<a class="icon-btn" href="${esc(safeUrl(it.url))}" target="_blank" rel="noopener" title="לאתר">🔗</a>` : ""}
           <a class="icon-btn" href="${mapUrl(it.name + (t.location ? " " + t.location : ""))}" target="_blank" rel="noopener" title="במפה">🗺️</a>
-          ${ed ? `<button class="icon-btn" data-act="edit-item" data-cat="${cat.key}" data-id="${esc(it.id)}" title="עריכה">✎</button>
+          ${ed ? `<button class="icon-btn" data-act="add-file" data-cat="${cat.key}" data-id="${esc(it.id)}" title="צירוף קובץ">📎</button>
+          <button class="icon-btn" data-act="edit-item" data-cat="${cat.key}" data-id="${esc(it.id)}" title="עריכה">✎</button>
           <button class="icon-btn" data-act="rm-item" data-cat="${cat.key}" data-id="${esc(it.id)}" title="מחיקה">✕</button>` : ""}
         </div></li>`).join("");
     if (!ed) return items.length ? `<section class="sec"><h2>${cat.icon} ${cat.title} <span class="n">${items.length}</span></h2><ul>${lis}</ul></section>` : "";
@@ -290,6 +332,7 @@ function renderTrip(t){
         <input class="field f-url" type="text" inputmode="url" autocapitalize="off" name="url" dir="ltr" data-keep="${cat.key}-url" placeholder="אתר אינטרנט (לא חובה)">
         ${cat.types ? `<select class="field" name="type" data-keep="${cat.key}-type">${cat.types.map(x => `<option>${x}</option>`).join("")}</select>` : ""}
         ${cat.rating ? `<select class="field" name="rating" data-keep="${cat.key}-rating" title="דירוג"><option value="0">דירוג</option>${[5,4,3,2,1].map(r => `<option value="${r}">${"★".repeat(r)}</option>`).join("")}</select>` : ""}
+        <label class="btn small att-pick">📎 ${(pendingFiles[cat.key] || []).length ? (pendingFiles[cat.key].length === 1 ? "קובץ אחד נבחר" : pendingFiles[cat.key].length + " קבצים נבחרו") : "צירוף קובץ (תמונה, מסמך)"}<input type="file" class="f-files" data-cat="${cat.key}" multiple hidden accept="${ATT_ACCEPT}"></label>
         <button class="btn small primary" type="submit">הוספה</button>
       </form></section>`;
   }).join("");
@@ -448,6 +491,7 @@ app.addEventListener("input", e => { if (e.target.id === "q"){ homeQuery = e.tar
 app.addEventListener("change", e => {
   if (e.target.id === "sort"){ homeSort = e.target.value; render(); }
   if (e.target.id === "upl"){ const t = currentTrip(); if (t) handleUpload(t.id, e.target.files); }
+  if (e.target.classList.contains("f-files")){ pendingFiles[e.target.dataset.cat] = Array.from(e.target.files || []); render(); }
 });
 app.addEventListener("submit", async e => {
   const f = e.target.closest("form.add"); if (!f) return;
@@ -460,8 +504,14 @@ app.addEventListener("submit", async e => {
   if ((fd.url || "").trim() && !item.url){ toast("כתובת האתר לא תקינה"); return; }
   if (cat.types) item.type = fd.type || "";
   if (cat.rating) item.rating = +fd.rating || 0;
+  const files = pendingFiles[cat.key] || [];
   f.querySelectorAll("input").forEach(i => i.value = "");
   if (cat.rating) f.querySelector("[name=rating]").value = "0";
+  if (files.length){
+    delete pendingFiles[cat.key];
+    const btn = f.querySelector("[type=submit]"); if (btn) btn.disabled = true;
+    item.files = await uploadAttachments(t.id, files);
+  }
   const p = saveTrip(t.id, x => ({[cat.key]:(x[cat.key] || []).concat(item)}));
   const ni = app.querySelector(`form.add[data-cat="${cat.key}"] [name=name]`); if (ni) ni.focus();
   try { await p; } catch(err){}
@@ -477,6 +527,19 @@ app.addEventListener("click", e => {
     }});
   }
   if (!t) return;
+  if (act === "add-file"){
+    const pick = $("attPick"); pick.dataset.cat = el.dataset.cat; pick.dataset.id = el.dataset.id; pick.value = ""; pick.click(); return;
+  }
+  if (act === "rm-file"){
+    const cat = CATS.find(c => c.key === el.dataset.cat), id = el.dataset.id, path = el.dataset.path;
+    const it = (t[cat.key] || []).find(x => x.id === id); const f = it && (it.files || []).find(x => x.path === path); if (!f) return;
+    modal({title:"להסיר את הקובץ?", danger:true, submit:"הסרה", html:`<p>"${esc(f.name)}" יימחק לצמיתות.</p>`, onSubmit: async () => {
+      try { await saveTrip(t.id, x => ({[cat.key]:(x[cat.key] || []).map(y => y.id === id ? Object.assign({}, y, {files:(y.files || []).filter(z => z.path !== path)}) : y)})); }
+      catch(err){ return false; }
+      await removeFiles([path]);
+    }});
+    return;
+  }
   if (act === "edit-mode"){ editId = t.id; render(); return; }
   if (act === "view"){ editId = null; render(); window.scrollTo(0, 0); return; }
   if (act === "edit"){
@@ -488,7 +551,7 @@ app.addEventListener("click", e => {
     modal({title:"למחוק את החופשה?", danger:true, submit:"מחיקה לצמיתות",
       html:`<p>"${esc(t.title)}" תימחק יחד עם כל הפרטים ו-${(t.photos || []).length} התמונות שלה. אי אפשר לבטל את זה.</p>`,
       onSubmit: async () => {
-        const paths = (t.photos || []).map(p => p.path);
+        const paths = (t.photos || []).map(p => p.path).concat(itemFilePaths(t));
         try { await removeTrip(t.id); } catch(err){ toast("המחיקה נכשלה, נסה שוב"); return false; }
         location.hash = "";
         await removeFiles(paths);
@@ -499,7 +562,8 @@ app.addEventListener("click", e => {
     const cat = CATS.find(c => c.key === el.dataset.cat), id = el.dataset.id;
     const it = (t[cat.key] || []).find(x => x.id === id); if (!it) return;
     if (act === "rm-item"){
-      saveTrip(t.id, x => ({[cat.key]:(x[cat.key] || []).filter(y => y.id !== id)})).then(() => toast(`"${it.name}" הוסר`), () => {});
+      saveTrip(t.id, x => ({[cat.key]:(x[cat.key] || []).filter(y => y.id !== id)}))
+        .then(() => { toast(`"${it.name}" הוסר`); removeFiles((it.files || []).map(f => f.path)); }, () => {});
     } else {
       modal({title:"עריכה", html:`<label>שם</label><input class="field" name="name" required value="${esc(it.name)}">
         <label>רשמים / הערה</label><textarea class="field" name="note">${esc(it.note)}</textarea>
@@ -530,10 +594,21 @@ app.addEventListener("click", e => {
     }});
   }
 });
+const attPick = document.createElement("input");
+attPick.type = "file"; attPick.id = "attPick"; attPick.multiple = true; attPick.hidden = true; attPick.accept = ATT_ACCEPT;
+document.body.appendChild(attPick);
+attPick.addEventListener("change", async () => {
+  const t = currentTrip(), files = Array.from(attPick.files || []), cat = attPick.dataset.cat, id = attPick.dataset.id;
+  if (!t || !files.length) return;
+  const added = await uploadAttachments(t.id, files);
+  if (!added.length) return;
+  try { await saveTrip(t.id, x => ({[cat]:(x[cat] || []).map(y => y.id === id ? Object.assign({}, y, {files:(y.files || []).concat(added)}) : y)})); }
+  catch(e){ removeFiles(added.map(a => a.path)); }
+});
 let hiddenAt = 0;
 document.addEventListener("visibilitychange", () => {
   if (document.hidden){ hiddenAt = Date.now(); return; }
-  if (user && albumOwner && loaded && Date.now() - hiddenAt > 30000 && !document.querySelector(".ov") && !uploading) loadAll();
+  if (user && albumOwner && loaded && Date.now() - hiddenAt > 30000 && !document.querySelector(".ov") && !uploading && !Object.keys(pendingFiles).length) loadAll();
 });
 window.addEventListener("hashchange", () => { const h = decodeURIComponent(location.hash.slice(1)); if (h !== "trip-" + editId) editId = null; render(); window.scrollTo(0, 0); });
 
