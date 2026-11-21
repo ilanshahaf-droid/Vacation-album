@@ -88,7 +88,9 @@ function fetchUrls(){
 }
 
 /* ---------- data ---------- */
+let writeSeq = 0, busyUploads = 0, pickerAt = 0;
 async function loadAll(){
+  const seq = writeSeq;
   const {data, error} = await sb.from(T).select("*").eq("user_id", albumOwner).order("start_date", {ascending:false, nullsFirst:false});
   loaded = true;
   if (error){
@@ -97,6 +99,8 @@ async function loadAll(){
       : "לא הצלחתי לטעון את האלבום. בדוק את החיבור לאינטרנט ורענן."}</div>`;
     return;
   }
+  // a save started while we were loading: this snapshot may be stale, load again shortly
+  if (seq !== writeSeq || busyUploads){ setTimeout(loadAll, 1500); return; }
   trips = data.map(fromRow);
   render();
 }
@@ -109,6 +113,7 @@ const queues = {};
 /* patchFn gets the freshest copy of the trip and returns the fields to change */
 function saveTrip(id, patchFn){
   const run = async () => {
+    writeSeq++;
     const t = tripById(id); if (!t) return;
     const before = JSON.parse(JSON.stringify(t));
     const patch = patchFn(t);
@@ -145,6 +150,10 @@ async function uploadAttachment(tripId, file){
   return {path, name:file.name || "קובץ", type, size:blob.size};
 }
 async function uploadAttachments(tripId, files){
+  busyUploads++;
+  try { return await uploadAttachmentsInner(tripId, files); } finally { busyUploads--; }
+}
+async function uploadAttachmentsInner(tripId, files){
   const out = []; let failed = 0, mime = false;
   for (let i = 0; i < files.length; i++){
     toast(`מעלה קובץ ${i + 1} מתוך ${files.length}…`, 60000);
@@ -435,6 +444,10 @@ async function shrink(file){
   } finally { URL.revokeObjectURL(url); }
 }
 async function handleUpload(tripId, files){
+  busyUploads++;
+  try { return await handleUploadInner(tripId, files); } finally { busyUploads--; }
+}
+async function handleUploadInner(tripId, files){
   files = Array.from(files || []);
   if (!files.length) return;
   const added = []; let failed = 0, stop = false;
@@ -528,7 +541,7 @@ app.addEventListener("click", e => {
   }
   if (!t) return;
   if (act === "add-file"){
-    const pick = $("attPick"); pick.dataset.cat = el.dataset.cat; pick.dataset.id = el.dataset.id; pick.value = ""; pick.click(); return;
+    const pick = $("attPick"); pick.dataset.cat = el.dataset.cat; pick.dataset.id = el.dataset.id; pick.value = ""; pickerAt = Date.now(); pick.click(); return;
   }
   if (act === "rm-file"){
     const cat = CATS.find(c => c.key === el.dataset.cat), id = el.dataset.id, path = el.dataset.path;
@@ -602,13 +615,16 @@ attPick.addEventListener("change", async () => {
   if (!t || !files.length) return;
   const added = await uploadAttachments(t.id, files);
   if (!added.length) return;
+  pickerAt = 0;
+  if (!tripById(t.id) || !(tripById(t.id)[cat] || []).some(y => y.id === id)){ toast("הפריט לא נמצא – הקבצים לא נשמרו"); removeFiles(added.map(a => a.path)); return; }
   try { await saveTrip(t.id, x => ({[cat]:(x[cat] || []).map(y => y.id === id ? Object.assign({}, y, {files:(y.files || []).concat(added)}) : y)})); }
   catch(e){ removeFiles(added.map(a => a.path)); }
 });
+document.addEventListener("click", e => { if (e.target.closest && e.target.closest("label") && e.target.closest("label").querySelector("input[type=file]")) pickerAt = Date.now(); }, true);
 let hiddenAt = 0;
 document.addEventListener("visibilitychange", () => {
   if (document.hidden){ hiddenAt = Date.now(); return; }
-  if (user && albumOwner && loaded && Date.now() - hiddenAt > 30000 && !document.querySelector(".ov") && !uploading && !Object.keys(pendingFiles).length) loadAll();
+  if (user && albumOwner && loaded && Date.now() - hiddenAt > 30000 && !document.querySelector(".ov") && !uploading && !Object.keys(pendingFiles).length && !busyUploads && Date.now() - pickerAt > 600000) loadAll();
 });
 window.addEventListener("hashchange", () => { const h = decodeURIComponent(location.hash.slice(1)); if (h !== "trip-" + editId) editId = null; render(); window.scrollTo(0, 0); });
 
