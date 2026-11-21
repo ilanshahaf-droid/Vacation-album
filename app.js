@@ -310,7 +310,7 @@ function renderTrip(t){
           ${range ? `<span>📅 ${esc(range)}${n ? ` · ${n === 1 ? "לילה אחד" : n + " לילות"}` : ""}</span>` : ""}
           ${t.companions ? `<span>👨‍👩‍👧 ${esc(t.companions)}</span>` : ""}
         </div>
-        ${safeGp(t.gphotos) ? `<a class="btn small" style="margin-top:12px" href="${esc(safeGp(t.gphotos))}" target="_blank" rel="noopener">🖼️ לאלבום בגוגל תמונות</a>` : ""}
+        ${safeGp(t.gphotos) ? `<a class="gp-btn" href="${esc(safeGp(t.gphotos))}" target="_blank" rel="noopener"><span class="gp-ic">🖼️</span>לאלבום בגוגל תמונות</a>` : ""}
         </div>
     </section>
     ${t.summary ? `<div class="notes"><h2>רשמים וזיכרונות</h2>${esc(t.summary)}</div>` : ""}
