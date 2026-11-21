@@ -1,7 +1,7 @@
 (function(){
 "use strict";
 
-const T = "album_trips", BUCKET = "album-photos";
+const T = "album_trips", T_MEM = "album_members", BUCKET = "album-photos";
 const CATS = [
   {key:"places", title:"מקומות שביקרנו בהם", icon:"📍", ph:"למשל: העיר העתיקה, נמל הדייגים"},
   {key:"restaurants", title:"מסעדות שאכלנו בהן", icon:"🍽️", ph:"שם המסעדה", rating:true},
@@ -12,7 +12,7 @@ const CATS = [
 const $ = id => document.getElementById(id);
 const app = $("app");
 
-let user = null, trips = [], loaded = false, homeQuery = "", homeSort = "desc", uploading = "";
+let user = null, albumOwner = null, albums = [], membersOk = false, trips = [], loaded = false, homeQuery = "", homeSort = "desc", uploading = "";
 const urls = {};          // storage path -> signed url
 const wanted = new Set(); // paths waiting for a signed url
 
@@ -22,12 +22,12 @@ const sb = (cfg.SUPABASE_URL && cfg.SUPABASE_ANON_KEY && window.supabase)
   ? window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY) : null;
 
 const COLS = {title:"title", location:"location", startDate:"start_date", endDate:"end_date", companions:"companions",
-  summary:"summary", places:"places", restaurants:"restaurants", sites:"sites", shows:"shows", photos:"photos", cover:"cover", updatedAt:"updated_at"};
+  summary:"summary", places:"places", restaurants:"restaurants", sites:"sites", shows:"shows", photos:"photos", cover:"cover", gphotos:"gphotos", updatedAt:"updated_at"};
 function toRow(o){ const r = {}; for (const k in o) if (COLS[k]) r[COLS[k]] = (k === "startDate" || k === "endDate") ? (o[k] || null) : o[k]; return r; }
 function fromRow(r){
   return {id:r.id, title:r.title || "", location:r.location || "", startDate:r.start_date || "", endDate:r.end_date || "",
     companions:r.companions || "", summary:r.summary || "", places:r.places || [], restaurants:r.restaurants || [],
-    sites:r.sites || [], shows:r.shows || [], photos:r.photos || [], cover:r.cover || "", createdAt:Date.parse(r.created_at) || 0};
+    sites:r.sites || [], shows:r.shows || [], photos:r.photos || [], cover:r.cover || "", gphotos:r.gphotos || "", createdAt:Date.parse(r.created_at) || 0};
 }
 
 /* ---------- helpers ---------- */
@@ -46,6 +46,7 @@ function fmtRange(s, e){
   return fmtD(a, {day:"numeric", month:"short", year:"numeric"}) + " – " + fmtD(b, {day:"numeric", month:"short", year:"numeric"});
 }
 function nights(s, e){ const a = pd(s), b = pd(e); if (!a || !b) return 0; return Math.max(0, Math.round((b - a) / 864e5)); }
+const safeGp = u => /^https:\/\/([a-z0-9-]+\.)*(google\.com|goo\.gl)\//i.test(u || "") ? u : "";
 const mapUrl = q => "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q);
 let tt;
 function toast(msg, ms){
@@ -84,7 +85,7 @@ function fetchUrls(){
 
 /* ---------- data ---------- */
 async function loadAll(){
-  const {data, error} = await sb.from(T).select("*").order("start_date", {ascending:false, nullsFirst:false});
+  const {data, error} = await sb.from(T).select("*").eq("user_id", albumOwner).order("start_date", {ascending:false, nullsFirst:false});
   loaded = true;
   if (error){
     app.innerHTML = `<div class="banner">${/permission denied|does not exist|schema cache/i.test(error.message || "")
@@ -96,7 +97,7 @@ async function loadAll(){
   render();
 }
 async function createTrip(o){
-  const {data, error} = await sb.from(T).insert(Object.assign(toRow(o), {user_id:user.id})).select().single();
+  const {data, error} = await sb.from(T).insert(Object.assign(toRow(o), {user_id:albumOwner})).select().single();
   if (error) throw error;
   const t = fromRow(data); trips.push(t); return t.id;
 }
@@ -122,6 +123,58 @@ async function removeTrip(id){
 async function removeFiles(paths){
   if (!paths.length) return;
   for (let i = 0; i < paths.length; i += 100) await sb.storage.from(BUCKET).remove(paths.slice(i, i + 100)).catch(() => {});
+}
+
+/* ---------- albums & sharing ---------- */
+const myEmail = () => ((user && user.email) || "").toLowerCase();
+function pickKey(){ return "album-owner-" + user.id; }
+async function loadAlbums(){
+  albums = [{owner:user.id, label:"האלבום שלי"}];
+  const {data, error} = await sb.from(T_MEM).select("owner_id,email,owner_email");
+  membersOk = !error;
+  if (!error) data.filter(m => m.owner_id !== user.id && (m.email || "").toLowerCase() === myEmail())
+    .forEach(m => albums.push({owner:m.owner_id, label:"האלבום של " + (m.owner_email || "שותף")}));
+  let saved = null; try{ saved = localStorage.getItem(pickKey()); }catch(e){}
+  albumOwner = albums.some(a => a.owner === saved) ? saved : (albums[1] || albums[0]).owner;
+  renderAcct();
+}
+function renderAcct(){
+  const own = albumOwner === user.id;
+  $("acctExtra").innerHTML = (albums.length > 1
+      ? `<select id="albumPick" class="field" style="width:auto;padding:4px 8px;font-size:13px">${albums.map(a => `<option value="${esc(a.owner)}"${a.owner === albumOwner ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select>` : "")
+    + (own && membersOk ? `<button type="button" id="btnShare">👥 שיתוף</button>` : "");
+}
+document.addEventListener("change", e => {
+  if (e.target.id !== "albumPick") return;
+  albumOwner = e.target.value; try{ localStorage.setItem(pickKey(), albumOwner); }catch(err){}
+  trips = []; loaded = false; location.hash = ""; renderAcct(); render(); loadAll();
+});
+document.addEventListener("click", e => { if (e.target.id === "btnShare") openShare(); });
+async function openShare(){
+  const {data, error} = await sb.from(T_MEM).select("email").eq("owner_id", user.id).order("created_at");
+  if (error){ toast("לא הצלחתי לטעון את השיתופים"); return; }
+  const list = data.map(m => m.email);
+  const listHtml = () => list.length
+    ? list.map(em => `<li style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px dashed var(--line)"><span dir="ltr">${esc(em)}</span><button type="button" class="icon-btn" data-rm-share="${esc(em)}" title="הסרה">✕</button></li>`).join("")
+    : `<li class="nothing">האלבום עוד לא משותף עם אף אחד.</li>`;
+  modal({title:"שיתוף האלבום", submit:"הוספה",
+    html:`<p>מי שתוסיף כאן יוכל לצפות באלבום, להוסיף חופשות ותמונות ולערוך אותן. הכניסה שלו/שלה היא עם Google (או אימייל וסיסמה) באותה כתובת מייל.</p>
+      <ul id="shareList" style="list-style:none;padding:0;margin:12px 0">${listHtml()}</ul>
+      <label>כתובת Gmail להוספה</label><input class="field" type="email" name="email" dir="ltr" placeholder="name@gmail.com" required>`,
+    onSubmit: async fd => {
+      const em = (fd.email || "").trim().toLowerCase();
+      if (!em || list.includes(em)) return false;
+      const {error} = await sb.from(T_MEM).insert({owner_id:user.id, email:em, owner_email:user.email || ""});
+      if (error){ toast("השיתוף נכשל, נסה שוב"); return false; }
+      toast("האלבום שותף עם " + em);
+    }});
+  document.getElementById("shareList").addEventListener("click", async ev => {
+    const em = ev.target.dataset && ev.target.dataset.rmShare; if (!em) return;
+    const {error} = await sb.from(T_MEM).delete().eq("owner_id", user.id).eq("email", em);
+    if (error){ toast("ההסרה נכשלה"); return; }
+    list.splice(list.indexOf(em), 1); document.getElementById("shareList").innerHTML = listHtml();
+    toast("השיתוף עם " + em + " הוסר");
+  });
 }
 
 /* ---------- render ---------- */
@@ -182,7 +235,7 @@ function renderHome(){
   }
 
   app.innerHTML = `<header class="top">
-      <div><h1>אלבום <span>החופשות</span> שלנו</h1>
+      <div><h1>אלבום <span>החופשות</span> שלנו</h1>${albumOwner !== user.id ? `<p class="sub">${esc((albums.find(a => a.owner === albumOwner) || {}).label || "")} · משותף איתך</p>` : ""}
       <p class="sub">${trips.length} חופשות · ${totalPhotos} תמונות${totalDays ? " · " + totalDays + " ימי נופש" : ""}</p></div>
       <button class="btn primary" data-act="new">+ חופשה חדשה</button>
     </header>
@@ -252,7 +305,9 @@ function renderTrip(t){
           ${t.location ? `<span>📍 <a href="${mapUrl(t.location)}" target="_blank" rel="noopener">${esc(t.location)}</a></span>` : ""}
           ${range ? `<span>📅 ${esc(range)}${n ? ` · ${n === 1 ? "לילה אחד" : n + " לילות"}` : ""}</span>` : ""}
           ${t.companions ? `<span>👨‍👩‍👧 ${esc(t.companions)}</span>` : ""}
-        </div></div>
+        </div>
+        ${safeGp(t.gphotos) ? `<a class="btn small" style="margin-top:12px" href="${esc(safeGp(t.gphotos))}" target="_blank" rel="noopener">🖼️ לאלבום בגוגל תמונות</a>` : ""}
+        </div>
     </section>
     ${t.summary ? `<div class="notes"><h2>רשמים וזיכרונות</h2>${esc(t.summary)}</div>` : ""}
     <div class="secs">${secs}</div>
@@ -292,11 +347,12 @@ function tripForm(t){
     <div class="row"><div><label>מתאריך</label><input class="field" type="date" name="startDate" value="${esc(t.startDate)}"></div>
     <div><label>עד תאריך</label><input class="field" type="date" name="endDate" value="${esc(t.endDate)}"></div></div>
     <label>מי היה איתנו</label><input class="field" name="companions" value="${esc(t.companions)}" placeholder="לא חובה">
+    <label>קישור לאלבום בגוגל תמונות</label><input class="field" type="url" name="gphotos" dir="ltr" value="${esc(t.gphotos)}" placeholder="https://photos.app.goo.gl/…">
     <label>רשמים וזיכרונות</label><textarea class="field" name="summary" placeholder="מה היה הכי כיף, רגעים מצחיקים, מה לזכור לפעם הבאה…">${esc(t.summary)}</textarea>`;
 }
 function cleanTrip(fd){
   const o = {title:(fd.title || "").trim(), location:(fd.location || "").trim(), startDate:fd.startDate || "", endDate:fd.endDate || "",
-    companions:(fd.companions || "").trim(), summary:(fd.summary || "").trim()};
+    companions:(fd.companions || "").trim(), summary:(fd.summary || "").trim(), gphotos:safeGp((fd.gphotos || "").trim())};
   if (o.startDate && o.endDate && o.endDate < o.startDate){ const x = o.startDate; o.startDate = o.endDate; o.endDate = x; }
   return o;
 }
@@ -322,7 +378,7 @@ async function handleUpload(tripId, files){
     uploading = `מעלה ${i + 1} מתוך ${files.length}…`; render();
     try {
       const blob = await shrink(files[i]);
-      const path = `${user.id}/${tripId}/${rid()}.jpg`;
+      const path = `${albumOwner}/${tripId}/${rid()}.jpg`;
       const {error} = await sb.storage.from(BUCKET).upload(path, blob, {contentType:"image/jpeg", upsert:false});
       if (error){
         if (/quota|exceed|limit/i.test(error.message || "")){ toast("נגמר המקום באחסון התמונות", 4500); stop = true; }
@@ -448,6 +504,11 @@ app.addEventListener("click", e => {
     }});
   }
 });
+let hiddenAt = 0;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden){ hiddenAt = Date.now(); return; }
+  if (user && albumOwner && loaded && Date.now() - hiddenAt > 30000 && !document.querySelector(".ov") && !uploading) loadAll();
+});
 window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); });
 
 /* ---------- auth ---------- */
@@ -469,7 +530,8 @@ function setUser(u){
   if (!u){ trips = []; loaded = false; show("auth"); return; }
   if (prev === u.id) return;
   $("acctEmail").textContent = u.email || "";
-  show("app"); loaded = false; render(); loadAll();
+  show("app"); loaded = false; albumOwner = u.id; render();
+  loadAlbums().then(loadAll);
 }
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
