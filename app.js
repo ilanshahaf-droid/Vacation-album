@@ -12,6 +12,7 @@ const CATS = [
 const $ = id => document.getElementById(id);
 const app = $("app");
 
+let editId = null;   // trip shown in edit mode
 let user = null, albumOwner = null, albums = [], membersOk = false, trips = [], loaded = false, homeQuery = "", homeSort = "desc", uploading = "";
 const urls = {};          // storage path -> signed url
 const wanted = new Set(); // paths waiting for a signed url
@@ -264,7 +265,7 @@ function cardHtml(t){
 }
 
 function renderTrip(t){
-  const c = coverOf(t);
+  const c = coverOf(t), ed = editId === t.id;
   const range = fmtRange(t.startDate, t.endDate), n = nights(t.startDate, t.endDate);
   const secs = CATS.map(cat => {
     const items = t[cat.key] || [];
@@ -273,9 +274,10 @@ function renderTrip(t){
         ${it.note ? `<span class="note">${esc(it.note)}</span>` : ""}</div>
         <div class="acts">
           <a class="icon-btn" href="${mapUrl(it.name + (t.location ? " " + t.location : ""))}" target="_blank" rel="noopener" title="במפה">🗺️</a>
-          <button class="icon-btn" data-act="edit-item" data-cat="${cat.key}" data-id="${esc(it.id)}" title="עריכה">✎</button>
-          <button class="icon-btn" data-act="rm-item" data-cat="${cat.key}" data-id="${esc(it.id)}" title="מחיקה">✕</button>
+          ${ed ? `<button class="icon-btn" data-act="edit-item" data-cat="${cat.key}" data-id="${esc(it.id)}" title="עריכה">✎</button>
+          <button class="icon-btn" data-act="rm-item" data-cat="${cat.key}" data-id="${esc(it.id)}" title="מחיקה">✕</button>` : ""}
         </div></li>`).join("");
+    if (!ed) return items.length ? `<section class="sec"><h2>${cat.icon} ${cat.title} <span class="n">${items.length}</span></h2><ul>${lis}</ul></section>` : "";
     return `<section class="sec">
       <h2>${cat.icon} ${cat.title} ${items.length ? `<span class="n">${items.length}</span>` : ""}</h2>
       ${items.length ? `<ul>${lis}</ul>` : `<p class="nothing">עוד לא נוסף כלום.</p>`}
@@ -293,14 +295,17 @@ function renderTrip(t){
       ${p.path === c ? '<span class="is-cover">שער</span>' : ""}
       ${imgTag(p.path, `data-act="open" data-i="${i}"`)}
       <figcaption>${esc(p.caption || "")}</figcaption>
-      <div class="acts">
+      ${ed ? `<div class="acts">
         <button class="icon-btn" data-act="cap" data-id="${esc(p.path)}" title="כיתוב">✎</button>
         ${p.path !== c ? `<button class="icon-btn" data-act="cover" data-id="${esc(p.path)}" title="קביעה כתמונת שער">★</button>` : ""}
         <button class="icon-btn" data-act="rm-photo" data-id="${esc(p.path)}" title="מחיקה">🗑</button>
-      </div></figure>`).join("");
+      </div>` : ""}</figure>`).join("");
+  const anyInfo = CATS.some(k => (t[k.key] || []).length) || photos.length || t.summary;
 
   app.innerHTML = `<nav class="bar"><a class="back" href="#">→ לכל החופשות</a>
-      <div style="display:flex;gap:6px"><button class="btn small" data-act="edit">✎ עריכת פרטים</button><button class="btn small ghost danger" data-act="del">מחיקה</button></div></nav>
+      <div style="display:flex;gap:6px">${ed
+        ? `<button class="btn small" data-act="edit">✎ פרטים כלליים</button><button class="btn small ghost danger" data-act="del">מחיקה</button><button class="btn small primary" data-act="view">✓ סיום</button>`
+        : `<button class="btn small" data-act="edit-mode">✎ עריכה</button>`}</div></nav>
     <section class="hero">
       ${c ? imgTag(c) : `<div class="nocover">✈️</div>`}
       <div class="shade"></div>
@@ -314,13 +319,14 @@ function renderTrip(t){
         </div>
     </section>
     ${t.summary ? `<div class="notes"><h2>רשמים וזיכרונות</h2>${esc(t.summary)}</div>` : ""}
-    <div class="secs">${secs}</div>
-    <section class="sec photos">
+    ${!ed && !anyInfo ? `<div class="empty" style="padding:36px 20px"><p>עוד לא נוספו פרטים לחופשה הזו.</p><p style="margin-top:12px"><button class="btn primary" data-act="edit-mode">✎ להוספת מקומות, מסעדות ותמונות</button></p></div>` : ""}
+    ${secs.trim() ? `<div class="secs">${secs}</div>` : ""}
+    ${ed || photos.length ? `<section class="sec photos">
       <div class="head"><h2>📷 תמונות שצילמנו ${photos.length ? `<span class="n">${photos.length}</span>` : ""}</h2>
         <div style="display:flex;gap:10px;align-items:center">${uploading ? `<span class="progress">${esc(uploading)}</span>` : ""}
-        <label class="btn primary small" ${uploading ? 'style="pointer-events:none;opacity:.6"' : ""}>+ הוספת תמונות<input type="file" id="upl" accept="image/*" multiple hidden></label></div></div>
+        ${ed ? `<label class="btn primary small" ${uploading ? 'style="pointer-events:none;opacity:.6"' : ""}>+ הוספת תמונות<input type="file" id="upl" accept="image/*" multiple hidden></label>` : ""}</div></div>
       ${photos.length ? `<div class="pgrid">${pg}</div>` : `<div class="drop">עוד אין תמונות. אפשר להעלות כמה בבת אחת.</div>`}
-    </section>`;
+    </section>` : ""}`;
 }
 
 /* ---------- modal ---------- */
@@ -461,11 +467,13 @@ app.addEventListener("click", e => {
 
   if (act === "new"){
     modal({title:"חופשה חדשה", html:tripForm(), submit:"יצירה", onSubmit: async fd => {
-      try { const id = await createTrip(cleanTrip(fd)); location.hash = "trip-" + id; }
+      try { const id = await createTrip(cleanTrip(fd)); editId = id; location.hash = "trip-" + id; }
       catch(err){ toast("השמירה נכשלה, נסה שוב"); return false; }
     }});
   }
   if (!t) return;
+  if (act === "edit-mode"){ editId = t.id; render(); return; }
+  if (act === "view"){ editId = null; render(); window.scrollTo(0, 0); return; }
   if (act === "edit"){
     modal({title:"עריכת פרטי החופשה", html:tripForm(t), onSubmit: async fd => {
       try { await saveTrip(t.id, () => cleanTrip(fd)); } catch(err){ return false; }
@@ -520,7 +528,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden){ hiddenAt = Date.now(); return; }
   if (user && albumOwner && loaded && Date.now() - hiddenAt > 30000 && !document.querySelector(".ov") && !uploading) loadAll();
 });
-window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); });
+window.addEventListener("hashchange", () => { const h = decodeURIComponent(location.hash.slice(1)); if (h !== "trip-" + editId) editId = null; render(); window.scrollTo(0, 0); });
 
 /* ---------- auth ---------- */
 function show(view){ $("loadingView").hidden = view !== "loading"; $("authView").hidden = view !== "auth"; $("appView").hidden = view !== "app"; }
