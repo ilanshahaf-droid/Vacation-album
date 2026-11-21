@@ -341,6 +341,13 @@ function modal({title, html, submit, danger, onSubmit}){
     catch(err){ b.disabled = false; }
   });
   document.body.appendChild(ov);
+  // end date picker starts from the chosen start date
+  const sd = ov.querySelector("[name=startDate]"), ed = ov.querySelector("[name=endDate]");
+  if (sd && ed){
+    const sync = () => { ed.min = sd.value || ""; if (sd.value && (!ed.value || ed.value < sd.value)) ed.value = sd.value; };
+    sd.addEventListener("change", sync); sd.addEventListener("input", sync);
+    if (sd.value) ed.min = sd.value;
+  }
   const f = ov.querySelector("input,textarea"); if (f) f.focus();
 }
 
