@@ -1,7 +1,7 @@
 {
-  "name": "אלבום החופשות שלנו",
-  "short_name": "אלבום חופשות",
-  "description": "אלבום זיכרונות מכל החופשות: מקומות, מסעדות, אתרים, מופעים ותמונות",
+  "name": "הזכרונות שלנו",
+  "short_name": "הזכרונות שלנו",
+  "description": "אלבום זכרונות: חופשות, הופעות, מסעדות ובילויים עם הילדים – עם מקומות, תמונות וקבצים",
   "lang": "he",
   "dir": "rtl",
   "start_url": "./",
@@ -11,7 +11,17 @@
   "background_color": "#f3ebdd",
   "theme_color": "#b4532f",
   "icons": [
-    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
-    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
   ]
 }

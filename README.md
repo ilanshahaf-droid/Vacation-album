@@ -1,9 +1,9 @@
-# אלבום החופשות שלנו
+# הזכרונות שלנו
 
-אלבום זיכרונות מכל החופשות: מיקום, תאריכים, מקומות, מסעדות, אתרים, הצגות/מופעים/מוזיאונים/אטרקציות ותמונות.
+אלבום זכרונות בלשוניות – חופשות, הופעות, מסעדות, עם הילדים, ולשוניות נוספות שיוצרים בכפתור "＋ לשונית". לכל זיכרון: מיקום, תאריכים, דירוג, רשמים, רשימות (מקומות, מסעדות, אתרים, מופעים, מנות, שירים, פעילויות), קבצים ותמונות.
 
 ## הקמה (פעם אחת)
-1. ב-Supabase (פרויקט Down-to-the-bone): SQL Editor ← להריץ את `schema.sql`, ואחריו את `update-sharing.sql` ו-`update-files.sql`.
+1. ב-Supabase (פרויקט Down-to-the-bone): SQL Editor ← להריץ את `schema.sql`, ואחריו, לפי הסדר: `update-sharing.sql`, `update-files.sql`, `update-tabs.sql`.
 2. ב-Supabase: Authentication ← URL Configuration ← להוסיף ל-Redirect URLs את
    `https://ilanshahaf-droid.github.io/Vacation-album/`
 3. ב-GitHub: Settings ← Pages ← Branch: `main` / root.

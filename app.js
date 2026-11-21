@@ -1,18 +1,33 @@
 (function(){
 "use strict";
 
-const T = "album_trips", T_MEM = "album_members", BUCKET = "album-photos";
-const CATS = [
+const T = "album_trips", T_MEM = "album_members", T_TABS = "album_tabs", BUCKET = "album-photos";
+/* every list a memory can hold; a tab chooses which of them it shows */
+const ALL_SECS = [
   {key:"places", title:"מקומות שביקרנו בהם", icon:"📍", ph:"למשל: העיר העתיקה, נמל הדייגים"},
   {key:"restaurants", title:"מסעדות שאכלנו בהן", icon:"🍽️", ph:"שם המסעדה", rating:true},
   {key:"sites", title:"אתרים שביקרנו בהם", icon:"🏛️", ph:"למשל: מבצר, פארק לאומי, תצפית"},
   {key:"shows", title:"הצגות, מופעים, מוזיאונים ואטרקציות", icon:"🎭", ph:"שם ההצגה / המוזיאון / האטרקציה",
     types:["הצגה","מופע","מוזיאון","אטרקציה","סיור","אחר"]},
+  {key:"activities", title:"פעילויות", icon:"🎈", ph:"למשל: סדנה, פארק מים, משחקייה"},
+  {key:"dishes", title:"מנות שאכלנו", icon:"🥘", ph:"שם המנה", rating:true, nomap:true},
+  {key:"songs", title:"שירים ורגעים מהמופע", icon:"🎵", ph:"שם השיר / רגע מיוחד", nomap:true},
 ];
+const SECTIONS = Object.fromEntries(ALL_SECS.map(c => [c.key, c]));
+const COLUMN_LISTS = ["places", "restaurants", "sites", "shows"];          // own columns
+const EXTRA_LISTS = ALL_SECS.map(c => c.key).filter(k => !COLUMN_LISTS.includes(k)); // kept in "lists" jsonb
+const DEFAULT_TABS = [
+  {key:"trips", name:"חופשות", icon:"🏝️", noun:"חופשה", sections:["places","restaurants","sites","shows"]},
+  {key:"shows", name:"הופעות", icon:"🎤", noun:"הופעה", sections:["songs"]},
+  {key:"restaurants", name:"מסעדות", icon:"🍽️", noun:"מסעדה", sections:["dishes"]},
+  {key:"kids", name:"עם הילדים", icon:"🧸", noun:"בילוי", sections:["places","activities","restaurants","shows"]},
+];
+const TITLE_PH = {trips:"למשל: אילת בקיץ, טיול לרומא", shows:"למשל: עומר אדם בפארק הירקון", restaurants:"שם המסעדה", kids:"למשל: יום כיף בספארי"};
 const $ = id => document.getElementById(id);
 const app = $("app");
 
 let editId = null;   // trip shown in edit mode
+let tabs = [], tabsOk = true, curTab = "trips";
 let user = null, albumOwner = null, albums = [], membersOk = false, trips = [], loaded = false, homeQuery = "", homeSort = "desc", uploading = "";
 const urls = {};          // storage path -> signed url
 const wanted = new Set(); // paths waiting for a signed url
@@ -23,13 +38,26 @@ const sb = (cfg.SUPABASE_URL && cfg.SUPABASE_ANON_KEY && window.supabase)
   ? window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY) : null;
 
 const COLS = {title:"title", location:"location", startDate:"start_date", endDate:"end_date", companions:"companions",
-  summary:"summary", places:"places", restaurants:"restaurants", sites:"sites", shows:"shows", photos:"photos", cover:"cover", gphotos:"gphotos", updatedAt:"updated_at"};
-function toRow(o){ const r = {}; for (const k in o) if (COLS[k]) r[COLS[k]] = (k === "startDate" || k === "endDate") ? (o[k] || null) : o[k]; return r; }
+  summary:"summary", places:"places", restaurants:"restaurants", sites:"sites", shows:"shows", photos:"photos", cover:"cover", gphotos:"gphotos", tab:"tab", rating:"rating", url:"url", updatedAt:"updated_at"};
+/* full = the whole memory after the change, so the "lists" column is always written complete */
+function toRow(o, full){
+  const r = {};
+  for (const k in o) if (COLS[k]) r[COLS[k]] = (k === "startDate" || k === "endDate") ? (o[k] || null) : o[k];
+  if (EXTRA_LISTS.some(k => k in o)){ const src = full || o; r.lists = Object.fromEntries(EXTRA_LISTS.map(k => [k, src[k] || []])); }
+  return r;
+}
 function fromRow(r){
   return {id:r.id, title:r.title || "", location:r.location || "", startDate:r.start_date || "", endDate:r.end_date || "",
     companions:r.companions || "", summary:r.summary || "", places:r.places || [], restaurants:r.restaurants || [],
-    sites:r.sites || [], shows:r.shows || [], photos:r.photos || [], cover:r.cover || "", gphotos:r.gphotos || "", createdAt:Date.parse(r.created_at) || 0};
+    sites:r.sites || [], shows:r.shows || [], photos:r.photos || [], cover:r.cover || "", gphotos:r.gphotos || "", createdAt:Date.parse(r.created_at) || 0,
+    tab:r.tab || "trips", rating:r.rating || 0, url:r.url || "",
+    ...Object.fromEntries(EXTRA_LISTS.map(k => [k, (r.lists || {})[k] || []]))};
 }
+const tabByKey = k => tabs.find(x => x.key === k) || tabs[0] || DEFAULT_TABS[0];
+const tabOf = t => tabByKey(t.tab || "trips");
+/* sections shown for a memory: its tab's choice, plus any list that already has items */
+const secsFor = t => { const want = tabOf(t).sections || [];
+  return ALL_SECS.filter(c => want.includes(c.key) || (t[c.key] || []).length); };
 
 /* ---------- helpers ---------- */
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -87,6 +115,24 @@ function fetchUrls(){
   }, 30);
 }
 
+/* ---------- tabs ---------- */
+const tabPrefKey = () => "album-tab-" + albumOwner;
+async function loadTabs(){
+  const sel = () => sb.from(T_TABS).select("*").eq("owner_id", albumOwner).order("sort").order("created_at");
+  let {data, error} = await sel();
+  if (!error && !data.length){
+    await sb.from(T_TABS).upsert(DEFAULT_TABS.map((d, i) => Object.assign({}, d, {owner_id:albumOwner, sort:i})),
+      {onConflict:"owner_id,key", ignoreDuplicates:true});
+    ({data, error} = await sel());
+  }
+  tabsOk = !error;
+  tabs = (!error && data.length) ? data.map(x => ({id:x.id, key:x.key, name:x.name, icon:x.icon, noun:x.noun, sections:x.sections || [], sort:x.sort}))
+                                 : DEFAULT_TABS.map(d => Object.assign({}, d));
+  let saved = null; try { saved = localStorage.getItem(tabPrefKey()); } catch(e){}
+  curTab = tabs.some(x => x.key === saved) ? saved : tabs[0].key;
+}
+function setTab(k){ curTab = k; homeQuery = ""; try { localStorage.setItem(tabPrefKey(), k); } catch(e){} }
+
 /* ---------- data ---------- */
 let writeSeq = 0, busyUploads = 0, pickerAt = 0;
 async function loadAll(){
@@ -118,7 +164,7 @@ function saveTrip(id, patchFn){
     const before = JSON.parse(JSON.stringify(t));
     const patch = patchFn(t);
     Object.assign(t, patch); render();
-    const {error} = await sb.from(T).update(toRow(Object.assign({}, patch, {updatedAt:new Date().toISOString()}))).eq("id", id);
+    const {error} = await sb.from(T).update(toRow(Object.assign({}, patch, {updatedAt:new Date().toISOString()}), t)).eq("id", id);
     if (error){ Object.assign(t, before); render(); toast("השמירה נכשלה, נסה שוב"); throw error; }
   };
   queues[id] = (queues[id] || Promise.resolve()).then(run, run);
@@ -176,7 +222,7 @@ function attsHtml(it, cat, ed){
     return `<span class="att-wrap">${inner}${ed ? `<button class="att-x" type="button" data-act="rm-file" data-cat="${cat.key}" data-id="${esc(it.id)}" data-path="${esc(f.path)}" title="הסרת הקובץ">✕</button>` : ""}</span>`;
   }).join("")}</div>`;
 }
-const itemFilePaths = t => CATS.flatMap(c => (t[c.key] || []).flatMap(i => (i.files || []).map(f => f.path)));
+const itemFilePaths = t => ALL_SECS.flatMap(c => (t[c.key] || []).flatMap(i => (i.files || []).map(f => f.path)));
 
 /* ---------- albums & sharing ---------- */
 const myEmail = () => ((user && user.email) || "").toLowerCase();
@@ -200,7 +246,7 @@ function renderAcct(){
 document.addEventListener("change", e => {
   if (e.target.id !== "albumPick") return;
   albumOwner = e.target.value; try{ localStorage.setItem(pickKey(), albumOwner); }catch(err){}
-  trips = []; loaded = false; location.hash = ""; renderAcct(); render(); loadAll();
+  trips = []; loaded = false; location.hash = ""; renderAcct(); render(); loadTabs().then(loadAll);
 });
 document.addEventListener("click", e => { if (e.target.id === "btnShare") openShare(); });
 async function openShare(){
@@ -215,7 +261,7 @@ async function openShare(){
     ? list.map(em => `<li style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px dashed var(--line)"><span dir="ltr">${esc(em)}</span><button type="button" class="icon-btn" data-rm-share="${esc(em)}" title="הסרה">✕</button></li>`).join("")
     : `<li class="nothing">האלבום עוד לא משותף עם אף אחד.</li>`;
   modal({title:"שיתוף האלבום", submit:"הוספה",
-    html:`<p>מי שתוסיף כאן יוכל לצפות באלבום, להוסיף חופשות ותמונות ולערוך אותן. הכניסה שלו/שלה היא עם Google (או אימייל וסיסמה) באותה כתובת מייל.</p>
+    html:`<p>מי שתוסיף כאן יוכל לצפות בכל הלשוניות, להוסיף זכרונות ותמונות ולערוך אותם. הכניסה שלו/שלה היא עם Google (או אימייל וסיסמה) באותה כתובת מייל.</p>
       <ul id="shareList" style="list-style:none;padding:0;margin:12px 0">${listHtml()}</ul>
       <label>כתובת Gmail להוספה</label><input class="field" type="email" name="email" dir="ltr" placeholder="name@gmail.com" required>`,
     onSubmit: async fd => {
@@ -248,22 +294,32 @@ function render(){
     if (t) renderTrip(t);
     else if (!loaded) app.innerHTML = '<div class="loading">טוען…</div>';
     else { location.hash = ""; return; }
-  } else if (!loaded) app.innerHTML = '<div class="loading">טוען את האלבום…</div>';
-  else renderHome();
+  } else if (!loaded) app.innerHTML = '<div class="loading">טוען…</div>';
+  else {
+    if (h.startsWith("tab-") && tabs.some(x => x.key === h.slice(4)) && curTab !== h.slice(4)) setTab(h.slice(4));
+    renderHome();
+  }
 
   app.querySelectorAll("[data-keep]").forEach(el => { if (keep[el.dataset.keep] != null) el.value = keep[el.dataset.keep]; });
   if (focusKey){ const el = app.querySelector('[data-keep="' + focusKey + '"]'); if (el){ el.focus(); try{ if (sel != null) el.setSelectionRange(sel, sel); }catch(e){} } }
   if (wanted.size) fetchUrls();
 }
 
+function tabsBar(){
+  return `<nav class="tabs" role="tablist">${tabs.map(x => {
+      const n = trips.filter(t => (t.tab || "trips") === x.key).length;
+      return `<a class="tab${x.key === curTab ? " on" : ""}" href="#tab-${encodeURIComponent(x.key)}" role="tab">${esc(x.icon)} ${esc(x.name)}${n ? `<span class="tn">${n}</span>` : ""}</a>`;
+    }).join("")}<button class="tab add-tab" type="button" data-act="new-tab" title="לשונית חדשה">＋ לשונית</button></nav>`;
+}
 function renderHome(){
-  const totalPhotos = trips.reduce((s, t) => s + (t.photos || []).length, 0);
-  const totalDays = trips.reduce((s, t) => s + (t.startDate && t.endDate ? nights(t.startDate, t.endDate) + 1 : 0), 0);
+  const tab = tabByKey(curTab);
+  const mine = trips.filter(t => (t.tab || "trips") === tab.key);
+  const totalPhotos = mine.reduce((s, t) => s + (t.photos || []).length, 0);
   const q = homeQuery.trim().toLowerCase();
-  const list = trips.filter(t => {
+  const list = mine.filter(t => {
     if (!q) return true;
     const hay = [t.title, t.location, t.companions, t.summary]
-      .concat(...CATS.map(c => (t[c.key] || []).map(i => i.name + " " + (i.note || ""))))
+      .concat(...ALL_SECS.map(c => (t[c.key] || []).map(i => i.name + " " + (i.note || ""))))
       .concat((t.photos || []).map(p => p.caption || "")).join(" ").toLowerCase();
     return hay.includes(q);
   });
@@ -274,12 +330,12 @@ function renderHome(){
   });
 
   let body = "";
-  if (!trips.length){
-    body = `<div class="empty"><div class="big">🧳</div><h2>האלבום עדיין ריק</h2>
-      <p>כל חופשה מקבלת דף משלה: מיקום, תאריכים, מקומות, מסעדות, אתרים, מופעים ותמונות.</p>
-      <p style="margin-top:18px"><button class="btn primary" data-act="new">+ להוסיף את החופשה הראשונה</button></p></div>`;
+  if (!mine.length){
+    body = `<div class="empty"><div class="big">${esc(tab.icon)}</div><h2>עוד אין כאן זכרונות</h2>
+      <p>כל ${esc(tab.noun)} מקבל/ת דף משלו: מיקום, תאריך, רשמים, תמונות וקבצים.</p>
+      <p style="margin-top:18px"><button class="btn primary" data-act="new">+ הוספת ${esc(tab.noun)}</button></p></div>`;
   } else if (!list.length){
-    body = `<div class="empty"><div class="big">🔍</div><p>לא נמצאו חופשות שמתאימות לחיפוש.</p></div>`;
+    body = `<div class="empty"><div class="big">🔍</div><p>לא נמצא כלום שמתאים לחיפוש.</p></div>`;
   } else {
     let lastYear = null, open = false;
     for (const t of list){
@@ -292,24 +348,29 @@ function renderHome(){
   }
 
   app.innerHTML = `<header class="top">
-      <div><h1>אלבום <span>החופשות</span> שלנו</h1>${albumOwner !== user.id ? `<p class="sub">${esc((albums.find(a => a.owner === albumOwner) || {}).label || "")} · משותף איתך</p>` : ""}
-      <p class="sub">${trips.length} חופשות · ${totalPhotos} תמונות${totalDays ? " · " + totalDays + " ימי נופש" : ""}</p></div>
-      <button class="btn primary" data-act="new">+ חופשה חדשה</button>
+      <div><h1>הזכרונות <span>שלנו</span></h1>${albumOwner !== user.id ? `<p class="sub">${esc((albums.find(a => a.owner === albumOwner) || {}).label || "")} · משותף איתך</p>` : ""}</div>
     </header>
-    ${trips.length ? `<div class="tools">
-      <input type="search" id="q" data-keep="q" placeholder="חיפוש: מקום, מסעדה, אטרקציה…" value="${esc(homeQuery)}">
-      <select id="sort"><option value="desc"${homeSort === "desc" ? " selected" : ""}>מהחדשה לישנה</option><option value="asc"${homeSort === "asc" ? " selected" : ""}>מהישנה לחדשה</option></select>
+    ${tabsOk ? "" : `<div class="banner">כדי להשתמש בלשוניות צריך להריץ פעם אחת את update-tabs.sql ב-Supabase. עד אז מוצגת רק לשונית החופשות.</div>`}
+    ${tabsBar()}
+    <div class="tabhead">
+      <p class="sub">${mine.length} ${esc(tab.name)} · ${totalPhotos} תמונות</p>
+      <div style="display:flex;gap:6px"><button class="btn small ghost" data-act="edit-tab" title="עריכת הלשונית">⚙️</button>
+      <button class="btn primary" data-act="new">+ ${esc(tab.noun)}</button></div>
+    </div>
+    ${mine.length ? `<div class="tools">
+      <input type="search" id="q" data-keep="q" placeholder="חיפוש ב${esc(tab.name)}…" value="${esc(homeQuery)}">
+      <select id="sort"><option value="desc"${homeSort === "desc" ? " selected" : ""}>מהחדש לישן</option><option value="asc"${homeSort === "asc" ? " selected" : ""}>מהישן לחדש</option></select>
     </div>` : ""}
     ${body}`;
 }
 
 function cardHtml(t){
   const c = coverOf(t);
-  const counts = CATS.map(k => (t[k.key] || []).length ? `<span>${k.icon} ${(t[k.key] || []).length}</span>` : "").join("")
+  const counts = secsFor(t).map(k => (t[k.key] || []).length ? `<span>${k.icon} ${(t[k.key] || []).length}</span>` : "").join("")
     + ((t.photos || []).length ? `<span>📷 ${t.photos.length}</span>` : "");
   return `<a class="card" href="#trip-${encodeURIComponent(t.id)}">
-    <div class="ph">${c ? imgTag(c) : "🏝️"}</div>
-    <h3>${esc(t.title || "חופשה ללא שם")}</h3>
+    <div class="ph">${c ? imgTag(c) : esc(tabOf(t).icon)}</div>
+    <h3>${esc(t.title || "ללא שם")}</h3>${t.rating ? `<div class="meta stars" style="margin:0 2px">${"★".repeat(t.rating)}</div>` : ""}
     ${t.location ? `<div class="meta">📍 ${esc(t.location)}</div>` : ""}
     ${fmtRange(t.startDate, t.endDate) ? `<div class="meta">📅 ${esc(fmtRange(t.startDate, t.endDate))}</div>` : ""}
     ${counts ? `<div class="counts">${counts}</div>` : ""}
@@ -317,16 +378,16 @@ function cardHtml(t){
 }
 
 function renderTrip(t){
-  const c = coverOf(t), ed = editId === t.id;
+  const c = coverOf(t), ed = editId === t.id, tab = tabOf(t);
   const range = fmtRange(t.startDate, t.endDate), n = nights(t.startDate, t.endDate);
-  const secs = CATS.map(cat => {
+  const secs = secsFor(t).map(cat => {
     const items = t[cat.key] || [];
     const lis = items.map(it => `<li>
         <div class="it"><b>${safeUrl(it.url) ? `<a href="${esc(safeUrl(it.url))}" target="_blank" rel="noopener" style="color:inherit">${esc(it.name)}</a>` : esc(it.name)}</b>${it.type ? `<span class="badge">${esc(it.type)}</span>` : ""}${it.rating ? `<span class="stars">${"★".repeat(it.rating)}${"☆".repeat(5 - it.rating)}</span>` : ""}
         ${it.note ? `<span class="note">${esc(it.note)}</span>` : ""}${attsHtml(it, cat, ed)}</div>
         <div class="acts">
           ${safeUrl(it.url) ? `<a class="icon-btn" href="${esc(safeUrl(it.url))}" target="_blank" rel="noopener" title="לאתר">🔗</a>` : ""}
-          <a class="icon-btn" href="${mapUrl(it.name + (t.location ? " " + t.location : ""))}" target="_blank" rel="noopener" title="במפה">🗺️</a>
+          ${cat.nomap ? "" : `<a class="icon-btn" href="${mapUrl(it.name + (t.location ? " " + t.location : ""))}" target="_blank" rel="noopener" title="במפה">🗺️</a>`}
           ${ed ? `<button class="icon-btn" data-act="add-file" data-cat="${cat.key}" data-id="${esc(it.id)}" title="צירוף קובץ">📎</button>
           <button class="icon-btn" data-act="edit-item" data-cat="${cat.key}" data-id="${esc(it.id)}" title="עריכה">✎</button>
           <button class="icon-btn" data-act="rm-item" data-cat="${cat.key}" data-id="${esc(it.id)}" title="מחיקה">✕</button>` : ""}
@@ -356,26 +417,28 @@ function renderTrip(t){
         ${p.path !== c ? `<button class="icon-btn" data-act="cover" data-id="${esc(p.path)}" title="קביעה כתמונת שער">★</button>` : ""}
         <button class="icon-btn" data-act="rm-photo" data-id="${esc(p.path)}" title="מחיקה">🗑</button>
       </div>` : ""}</figure>`).join("");
-  const anyInfo = CATS.some(k => (t[k.key] || []).length) || photos.length || t.summary;
+  const anyInfo = ALL_SECS.some(k => (t[k.key] || []).length) || photos.length || t.summary || ed;
 
-  app.innerHTML = `<nav class="bar"><a class="back" href="#">→ לכל החופשות</a>
+  app.innerHTML = `<nav class="bar"><a class="back" href="#tab-${encodeURIComponent(tab.key)}">→ ${esc(tab.icon)} ${esc(tab.name)}</a>
       <div style="display:flex;gap:6px">${ed
         ? `<button class="btn small" data-act="edit">✎ פרטים כלליים</button><button class="btn small ghost danger" data-act="del">מחיקה</button><button class="btn small primary" data-act="view">✓ סיום</button>`
         : `<button class="btn small" data-act="edit-mode">✎ עריכה</button>`}</div></nav>
     <section class="hero">
-      ${c ? imgTag(c) : `<div class="nocover">✈️</div>`}
+      ${c ? imgTag(c) : `<div class="nocover">${esc(tab.icon)}</div>`}
       <div class="shade"></div>
-      <div class="ht"><h1>${esc(t.title || "חופשה ללא שם")}</h1>
+      <div class="ht"><h1>${esc(t.title || "ללא שם")}</h1>
         <div class="facts">
           ${t.location ? `<span>📍 <a href="${mapUrl(t.location)}" target="_blank" rel="noopener">${esc(t.location)}</a></span>` : ""}
           ${range ? `<span>📅 ${esc(range)}${n ? ` · ${n === 1 ? "לילה אחד" : n + " לילות"}` : ""}</span>` : ""}
           ${t.companions ? `<span>👨‍👩‍👧 ${esc(t.companions)}</span>` : ""}
+          ${t.rating ? `<span class="stars" style="font-size:16px;margin:0">${"★".repeat(t.rating)}${"☆".repeat(5 - t.rating)}</span>` : ""}
         </div>
+        ${safeUrl(t.url) ? `<a class="gp-btn" href="${esc(safeUrl(t.url))}" target="_blank" rel="noopener"><span class="gp-ic">🔗</span>לאתר</a>` : ""}
         ${safeGp(t.gphotos) ? `<a class="gp-btn" href="${esc(safeGp(t.gphotos))}" target="_blank" rel="noopener"><span class="gp-ic">🖼️</span>לאלבום בגוגל תמונות</a>` : ""}
         </div>
     </section>
     ${t.summary ? `<div class="notes"><h2>רשמים וזיכרונות</h2>${esc(t.summary)}</div>` : ""}
-    ${!ed && !anyInfo ? `<div class="empty" style="padding:36px 20px"><p>עוד לא נוספו פרטים לחופשה הזו.</p><p style="margin-top:12px"><button class="btn primary" data-act="edit-mode">✎ להוספת מקומות, מסעדות ותמונות</button></p></div>` : ""}
+    ${!ed && !anyInfo ? `<div class="empty" style="padding:36px 20px"><p>עוד לא נוספו פרטים.</p><p style="margin-top:12px"><button class="btn primary" data-act="edit-mode">✎ להוספת פרטים ותמונות</button></p></div>` : ""}
     ${secs.trim() ? `<div class="secs">${secs}</div>` : ""}
     ${ed || photos.length ? `<section class="sec photos">
       <div class="head"><h2>📷 תמונות שצילמנו ${photos.length ? `<span class="n">${photos.length}</span>` : ""}</h2>
@@ -397,9 +460,9 @@ function modal({title, html, submit, danger, onSubmit}){
   ov.addEventListener("click", e => { if (e.target === ov || e.target.hasAttribute("data-x")) close(); });
   ov.querySelector("form").addEventListener("submit", async e => {
     e.preventDefault();
-    const fd = Object.fromEntries(new FormData(e.target).entries());
+    const raw = new FormData(e.target), fd = Object.fromEntries(raw.entries());
     const b = e.target.querySelector("[type=submit]"); b.disabled = true;
-    try { const r = await onSubmit(fd); if (r !== false) close(); else b.disabled = false; }
+    try { const r = await onSubmit(fd, raw); if (r !== false) close(); else b.disabled = false; }
     catch(err){ b.disabled = false; }
   });
   document.body.appendChild(ov);
@@ -413,21 +476,69 @@ function modal({title, html, submit, danger, onSubmit}){
   const f = ov.querySelector("input,textarea"); if (f) f.focus();
 }
 
-function tripForm(t){
+function tripForm(t, tab){
   t = t || {};
-  return `<label>שם החופשה *</label><input class="field" name="title" required value="${esc(t.title)}" placeholder="למשל: אילת בקיץ, טיול משפחתי לרומא">
-    <label>מיקום</label><input class="field" name="location" value="${esc(t.location)}" placeholder="עיר / אזור / מדינה">
-    <div class="row"><div><label>מתאריך</label><input class="field" type="date" name="startDate" value="${esc(t.startDate)}"></div>
-    <div><label>עד תאריך</label><input class="field" type="date" name="endDate" value="${esc(t.endDate)}"></div></div>
+  return `<label>שם *</label><input class="field" name="title" required value="${esc(t.title)}" placeholder="${esc(TITLE_PH[tab.key] || "")}">
+    <label>מיקום</label><input class="field" name="location" value="${esc(t.location)}" placeholder="עיר / מקום">
+    <div class="row"><div><label>תאריך</label><input class="field" type="date" name="startDate" value="${esc(t.startDate)}"></div>
+    <div><label>עד תאריך (לא חובה)</label><input class="field" type="date" name="endDate" value="${esc(t.endDate)}"></div></div>
     <label>מי היה איתנו</label><input class="field" name="companions" value="${esc(t.companions)}" placeholder="לא חובה">
+    <div class="row"><div><label>דירוג</label><select class="field" name="rating"><option value="0">ללא</option>${[5,4,3,2,1].map(r => `<option value="${r}"${r === t.rating ? " selected" : ""}>${"★".repeat(r)}</option>`).join("")}</select></div>
+    <div><label>אתר אינטרנט</label><input class="field" type="text" inputmode="url" autocapitalize="off" name="url" dir="ltr" value="${esc(t.url || "")}" placeholder="לא חובה"></div></div>
     <label>קישור לאלבום בגוגל תמונות</label><input class="field" type="url" name="gphotos" dir="ltr" value="${esc(t.gphotos)}" placeholder="https://photos.app.goo.gl/…">
     <label>רשמים וזיכרונות</label><textarea class="field" name="summary" placeholder="מה היה הכי כיף, רגעים מצחיקים, מה לזכור לפעם הבאה…">${esc(t.summary)}</textarea>`;
 }
 function cleanTrip(fd){
   const o = {title:(fd.title || "").trim(), location:(fd.location || "").trim(), startDate:fd.startDate || "", endDate:fd.endDate || "",
-    companions:(fd.companions || "").trim(), summary:(fd.summary || "").trim(), gphotos:safeGp((fd.gphotos || "").trim())};
+    companions:(fd.companions || "").trim(), summary:(fd.summary || "").trim(), gphotos:safeGp((fd.gphotos || "").trim()),
+    ...(tabsOk ? {rating:+fd.rating || 0, url:safeUrl(fd.url)} : {})};
   if (o.startDate && o.endDate && o.endDate < o.startDate){ const x = o.startDate; o.startDate = o.endDate; o.endDate = x; }
   return o;
+}
+
+/* ---------- tab create / edit ---------- */
+const TAB_ICONS = ["🏝️","🎤","🍽️","🧸","🎂","🏕️","⚽","🎉","❤️","🎬","🥾","✈️","🏛️","🎓","🐶","📁"];
+function tabModal(tab){
+  if (!tabsOk){ toast("כדי ליצור ולערוך לשוניות צריך להריץ פעם אחת את update-tabs.sql ב-Supabase", 5000); return; }
+  const isNew = !tab; tab = tab || {name:"", icon:"📁", noun:"", sections:["places"]};
+  const count = isNew ? 0 : trips.filter(t => (t.tab || "trips") === tab.key).length;
+  modal({title:isNew ? "לשונית חדשה" : "עריכת הלשונית", submit:isNew ? "יצירה" : "שמירה",
+    html:`<label>שם הלשונית *</label><input class="field" name="name" required maxlength="24" value="${esc(tab.name)}" placeholder="למשל: ימי הולדת, טיולים בארץ">
+      <label>אייקון</label><div class="icons">${TAB_ICONS.map(i => `<button type="button" class="ic${i === tab.icon ? " on" : ""}" data-ic="${i}">${i}</button>`).join("")}</div>
+      <input type="hidden" name="icon" value="${esc(tab.icon)}">
+      <label>איך קוראים לזיכרון אחד בלשונית?</label><input class="field" name="noun" maxlength="16" value="${esc(tab.noun)}" placeholder="למשל: יום הולדת, טיול, בילוי">
+      <label>רשימות בכל דף</label><div class="checks">${ALL_SECS.map(c => `<label class="chk"><input type="checkbox" name="sec" value="${c.key}"${(tab.sections || []).includes(c.key) ? " checked" : ""}> ${c.icon} ${c.title}</label>`).join("")}</div>
+      ${isNew ? "" : `<div style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">${count
+        ? `<p style="font-size:14px">אפשר למחוק לשונית רק כשהיא ריקה (יש בה ${count}).</p>`
+        : tabs.length > 1 ? `<button type="button" class="btn small ghost danger" id="delTab">🗑 מחיקת הלשונית</button>` : ""}</div>`}`,
+    onSubmit: async (fd, raw) => {
+      const row = {name:(fd.name || "").trim(), icon:fd.icon || "📁", noun:(fd.noun || "").trim() || "זיכרון", sections:raw.getAll("sec")};
+      if (!row.name) return false;
+      if (isNew){
+        row.key = "c" + rid(); row.owner_id = albumOwner; row.sort = Math.max(0, ...tabs.map(x => x.sort || 0)) + 1;
+        const {data, error} = await sb.from(T_TABS).insert(row).select().single();
+        if (error){ toast("יצירת הלשונית נכשלה"); return false; }
+        tabs.push({id:data.id, key:data.key, name:data.name, icon:data.icon, noun:data.noun, sections:data.sections || [], sort:data.sort});
+        setTab(data.key); location.hash = "tab-" + data.key; render();
+      } else {
+        const {error} = await sb.from(T_TABS).update(row).eq("id", tab.id);
+        if (error){ toast("השמירה נכשלה"); return false; }
+        Object.assign(tab, row); render();
+      }
+    }});
+  const ovs = document.querySelectorAll(".ov"), ov = ovs[ovs.length - 1];
+  ov.querySelector(".icons").addEventListener("click", e => {
+    const b = e.target.closest("[data-ic]"); if (!b) return;
+    ov.querySelectorAll(".ic").forEach(x => x.classList.toggle("on", x === b));
+    ov.querySelector("[name=icon]").value = b.dataset.ic;
+  });
+  const del = ov.querySelector("#delTab");
+  if (del) del.addEventListener("click", async () => {
+    const {error} = await sb.from(T_TABS).delete().eq("id", tab.id);
+    if (error){ toast("המחיקה נכשלה"); return; }
+    tabs = tabs.filter(x => x.id !== tab.id); setTab(tabs[0].key);
+    ov.remove(); location.hash = "tab-" + tabs[0].key; render(); toast("הלשונית נמחקה");
+  });
 }
 
 /* ---------- photos ---------- */
@@ -510,7 +621,7 @@ app.addEventListener("submit", async e => {
   const f = e.target.closest("form.add"); if (!f) return;
   e.preventDefault();
   const t = currentTrip(); if (!t) return;
-  const cat = CATS.find(c => c.key === f.dataset.cat);
+  const cat = SECTIONS[f.dataset.cat];
   const fd = Object.fromEntries(new FormData(f).entries());
   const name = (fd.name || "").trim(); if (!name) return;
   const item = {id:rid(), name, note:(fd.note || "").trim(), url:safeUrl(fd.url)};
@@ -534,17 +645,20 @@ app.addEventListener("click", e => {
   const act = el.dataset.act, t = currentTrip();
 
   if (act === "new"){
-    modal({title:"חופשה חדשה", html:tripForm(), submit:"יצירה", onSubmit: async fd => {
-      try { const id = await createTrip(cleanTrip(fd)); editId = id; location.hash = "trip-" + id; }
-      catch(err){ toast("השמירה נכשלה, נסה שוב"); return false; }
+    const tab = tabByKey(curTab);
+    modal({title:"הוספת " + tab.noun, html:tripForm(null, tab), submit:"יצירה", onSubmit: async fd => {
+      try { const id = await createTrip(Object.assign(cleanTrip(fd), tab.key === "trips" ? {} : {tab:tab.key})); editId = id; location.hash = "trip-" + id; }
+      catch(err){ toast(tabsOk ? "השמירה נכשלה, נסה שוב" : "צריך להריץ קודם את update-tabs.sql ב-Supabase"); return false; }
     }});
   }
+  if (act === "new-tab") return tabModal(null);
+  if (act === "edit-tab") return tabModal(tabByKey(curTab));
   if (!t) return;
   if (act === "add-file"){
     const pick = $("attPick"); pick.dataset.cat = el.dataset.cat; pick.dataset.id = el.dataset.id; pick.value = ""; pickerAt = Date.now(); pick.click(); return;
   }
   if (act === "rm-file"){
-    const cat = CATS.find(c => c.key === el.dataset.cat), id = el.dataset.id, path = el.dataset.path;
+    const cat = SECTIONS[el.dataset.cat], id = el.dataset.id, path = el.dataset.path;
     const it = (t[cat.key] || []).find(x => x.id === id); const f = it && (it.files || []).find(x => x.path === path); if (!f) return;
     modal({title:"להסיר את הקובץ?", danger:true, submit:"הסרה", html:`<p>"${esc(f.name)}" יימחק לצמיתות.</p>`, onSubmit: async () => {
       try { await saveTrip(t.id, x => ({[cat.key]:(x[cat.key] || []).map(y => y.id === id ? Object.assign({}, y, {files:(y.files || []).filter(z => z.path !== path)}) : y)})); }
@@ -556,23 +670,23 @@ app.addEventListener("click", e => {
   if (act === "edit-mode"){ editId = t.id; render(); return; }
   if (act === "view"){ editId = null; render(); window.scrollTo(0, 0); return; }
   if (act === "edit"){
-    modal({title:"עריכת פרטי החופשה", html:tripForm(t), onSubmit: async fd => {
+    modal({title:"עריכת פרטים", html:tripForm(t, tabOf(t)), onSubmit: async fd => {
       try { await saveTrip(t.id, () => cleanTrip(fd)); } catch(err){ return false; }
     }});
   }
   if (act === "del"){
-    modal({title:"למחוק את החופשה?", danger:true, submit:"מחיקה לצמיתות",
-      html:`<p>"${esc(t.title)}" תימחק יחד עם כל הפרטים ו-${(t.photos || []).length} התמונות שלה. אי אפשר לבטל את זה.</p>`,
+    modal({title:"למחוק?", danger:true, submit:"מחיקה לצמיתות",
+      html:`<p>"${esc(t.title)}" יימחק יחד עם כל הפרטים, הקבצים ו-${(t.photos || []).length} התמונות. אי אפשר לבטל את זה.</p>`,
       onSubmit: async () => {
         const paths = (t.photos || []).map(p => p.path).concat(itemFilePaths(t));
         try { await removeTrip(t.id); } catch(err){ toast("המחיקה נכשלה, נסה שוב"); return false; }
-        location.hash = "";
+        location.hash = "tab-" + (t.tab || "trips");
         await removeFiles(paths);
-        toast("החופשה נמחקה");
+        toast("נמחק");
       }});
   }
   if (act === "rm-item" || act === "edit-item"){
-    const cat = CATS.find(c => c.key === el.dataset.cat), id = el.dataset.id;
+    const cat = SECTIONS[el.dataset.cat], id = el.dataset.id;
     const it = (t[cat.key] || []).find(x => x.id === id); if (!it) return;
     if (act === "rm-item"){
       saveTrip(t.id, x => ({[cat.key]:(x[cat.key] || []).filter(y => y.id !== id)}))
@@ -626,7 +740,8 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden){ hiddenAt = Date.now(); return; }
   if (user && albumOwner && loaded && Date.now() - hiddenAt > 30000 && !document.querySelector(".ov") && !uploading && !Object.keys(pendingFiles).length && !busyUploads && Date.now() - pickerAt > 600000) loadAll();
 });
-window.addEventListener("hashchange", () => { const h = decodeURIComponent(location.hash.slice(1)); if (h !== "trip-" + editId) editId = null; render(); window.scrollTo(0, 0); });
+window.addEventListener("hashchange", () => { const h = decodeURIComponent(location.hash.slice(1));
+  if (h.startsWith("trip-")){ const t = tripById(h.slice(5)); if (t && (t.tab || "trips") !== curTab) setTab(t.tab || "trips"); } if (h !== "trip-" + editId) editId = null; render(); window.scrollTo(0, 0); });
 
 /* ---------- auth ---------- */
 function show(view){ $("loadingView").hidden = view !== "loading"; $("authView").hidden = view !== "auth"; $("appView").hidden = view !== "app"; }
@@ -648,7 +763,7 @@ function setUser(u){
   if (prev === u.id) return;
   $("acctEmail").textContent = u.email || "";
   show("app"); loaded = false; albumOwner = u.id; render();
-  loadAlbums().then(loadAll);
+  loadAlbums().then(loadTabs).then(loadAll);
 }
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
