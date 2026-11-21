@@ -48,6 +48,8 @@ function fmtRange(s, e){
 }
 function nights(s, e){ const a = pd(s), b = pd(e); if (!a || !b) return 0; return Math.max(0, Math.round((b - a) / 864e5)); }
 const safeGp = u => /^https:\/\/([a-z0-9-]+\.)*(google\.com|goo\.gl)\//i.test(u || "") ? u : "";
+const safeUrl = u => { u = (u || "").trim(); if (!u) return ""; if (!/^https?:\/\//i.test(u)) u = "https://" + u;
+  try { const x = new URL(u); return /^https?:$/.test(x.protocol) && x.hostname.includes(".") ? x.href : ""; } catch(e){ return ""; } };
 const mapUrl = q => "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q);
 let tt;
 function toast(msg, ms){
@@ -270,9 +272,10 @@ function renderTrip(t){
   const secs = CATS.map(cat => {
     const items = t[cat.key] || [];
     const lis = items.map(it => `<li>
-        <div class="it"><b>${esc(it.name)}</b>${it.type ? `<span class="badge">${esc(it.type)}</span>` : ""}${it.rating ? `<span class="stars">${"★".repeat(it.rating)}${"☆".repeat(5 - it.rating)}</span>` : ""}
+        <div class="it"><b>${safeUrl(it.url) ? `<a href="${esc(safeUrl(it.url))}" target="_blank" rel="noopener" style="color:inherit">${esc(it.name)}</a>` : esc(it.name)}</b>${it.type ? `<span class="badge">${esc(it.type)}</span>` : ""}${it.rating ? `<span class="stars">${"★".repeat(it.rating)}${"☆".repeat(5 - it.rating)}</span>` : ""}
         ${it.note ? `<span class="note">${esc(it.note)}</span>` : ""}</div>
         <div class="acts">
+          ${safeUrl(it.url) ? `<a class="icon-btn" href="${esc(safeUrl(it.url))}" target="_blank" rel="noopener" title="לאתר">🔗</a>` : ""}
           <a class="icon-btn" href="${mapUrl(it.name + (t.location ? " " + t.location : ""))}" target="_blank" rel="noopener" title="במפה">🗺️</a>
           ${ed ? `<button class="icon-btn" data-act="edit-item" data-cat="${cat.key}" data-id="${esc(it.id)}" title="עריכה">✎</button>
           <button class="icon-btn" data-act="rm-item" data-cat="${cat.key}" data-id="${esc(it.id)}" title="מחיקה">✕</button>` : ""}
@@ -284,6 +287,7 @@ function renderTrip(t){
       <form class="add" data-cat="${cat.key}">
         <input class="field f-name" name="name" data-keep="${cat.key}-name" placeholder="${esc(cat.ph)}" required>
         <input class="field f-note" name="note" data-keep="${cat.key}-note" placeholder="רשמים / הערה (לא חובה)">
+        <input class="field f-url" type="text" inputmode="url" autocapitalize="off" name="url" dir="ltr" data-keep="${cat.key}-url" placeholder="אתר אינטרנט (לא חובה)">
         ${cat.types ? `<select class="field" name="type" data-keep="${cat.key}-type">${cat.types.map(x => `<option>${x}</option>`).join("")}</select>` : ""}
         ${cat.rating ? `<select class="field" name="rating" data-keep="${cat.key}-rating" title="דירוג"><option value="0">דירוג</option>${[5,4,3,2,1].map(r => `<option value="${r}">${"★".repeat(r)}</option>`).join("")}</select>` : ""}
         <button class="btn small primary" type="submit">הוספה</button>
@@ -452,7 +456,8 @@ app.addEventListener("submit", async e => {
   const cat = CATS.find(c => c.key === f.dataset.cat);
   const fd = Object.fromEntries(new FormData(f).entries());
   const name = (fd.name || "").trim(); if (!name) return;
-  const item = {id:rid(), name, note:(fd.note || "").trim()};
+  const item = {id:rid(), name, note:(fd.note || "").trim(), url:safeUrl(fd.url)};
+  if ((fd.url || "").trim() && !item.url){ toast("כתובת האתר לא תקינה"); return; }
   if (cat.types) item.type = fd.type || "";
   if (cat.rating) item.rating = +fd.rating || 0;
   f.querySelectorAll("input").forEach(i => i.value = "");
@@ -498,10 +503,12 @@ app.addEventListener("click", e => {
     } else {
       modal({title:"עריכה", html:`<label>שם</label><input class="field" name="name" required value="${esc(it.name)}">
         <label>רשמים / הערה</label><textarea class="field" name="note">${esc(it.note)}</textarea>
+        <label>אתר אינטרנט</label><input class="field" type="text" inputmode="url" autocapitalize="off" name="url" dir="ltr" value="${esc(it.url || "")}" placeholder="https://…">
         ${cat.types ? `<label>סוג</label><select class="field" name="type">${cat.types.map(o => `<option${o === it.type ? " selected" : ""}>${o}</option>`).join("")}</select>` : ""}
         ${cat.rating ? `<label>דירוג</label><select class="field" name="rating"><option value="0">ללא</option>${[5,4,3,2,1].map(r => `<option value="${r}"${r === it.rating ? " selected" : ""}>${"★".repeat(r)}</option>`).join("")}</select>` : ""}`,
         onSubmit: async fd => {
-          const upd = {name:(fd.name || "").trim() || it.name, note:(fd.note || "").trim()};
+          const upd = {name:(fd.name || "").trim() || it.name, note:(fd.note || "").trim(), url:safeUrl(fd.url)};
+          if ((fd.url || "").trim() && !upd.url){ toast("כתובת האתר לא תקינה"); return false; }
           if (cat.types) upd.type = fd.type || ""; if (cat.rating) upd.rating = +fd.rating || 0;
           try { await saveTrip(t.id, x => ({[cat.key]:(x[cat.key] || []).map(y => y.id === id ? Object.assign({}, y, upd) : y)})); } catch(err){ return false; }
         }});

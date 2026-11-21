@@ -1,4 +1,4 @@
-const CACHE = "album-v6";
+const CACHE = "album-v7";
 const SHELL = ["./", "index.html", "app.js", "config.js", "manifest.json", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", e => {
